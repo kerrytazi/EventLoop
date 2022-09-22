@@ -37,7 +37,11 @@ struct timer_info;
 struct vtask_base;
 struct vjoin_task;
 
-class context;
+struct context;
+
+struct socket_t;
+struct tcp_server;
+struct accept_task;
 
 
 struct vtask_base
@@ -53,14 +57,10 @@ struct timer_info
 	std::chrono::steady_clock::time_point _time;
 };
 
-class context
+struct context
 {
-private:
-
 	std::vector<std::shared_ptr<vtask_base>> _ready_tasks;
 	std::vector<timer_info> _timers;
-
-private:
 
 	friend struct task_promise_type_base;
 	friend struct timer_task;
@@ -79,30 +79,7 @@ private:
 		this->_ready_tasks.push_back(vt);
 	}
 
-	void _loop(std::shared_ptr<vtask_base> main_vt, std::coroutine_handle<> main_handle)
-	{
-		this->_add_ready_task(main_vt);
-
-		while (!main_handle.done())
-		{
-			while (!this->_ready_tasks.empty())
-			{
-				auto vt = std::move(this->_ready_tasks.back());
-				this->_ready_tasks.pop_back();
-				vt->resume();
-			}
-
-			while (!this->_timers.empty())
-			{
-				auto tim = std::move(this->_timers.back());
-				this->_timers.pop_back();
-				std::this_thread::sleep_until(tim._time);
-				this->_add_ready_task(tim._task);
-			}
-		}
-	}
-
-public:
+	void _loop(std::shared_ptr<vtask_base> main_vt, std::coroutine_handle<> main_handle);
 
 	template <typename T>
 	T run(task<T> t)
@@ -143,7 +120,7 @@ struct task_promise_type : task_promise_type_base
 
 	void return_value(T val) { this->_value = std::optional<T>{ val }; }
 
-	T _get_result() { return this->_value.value(); }
+	T _get_result() { return std::move(this->_value).value(); }
 };
 
 template <>
@@ -200,7 +177,7 @@ struct task_base
 template <typename T>
 struct task : task_base<T>
 {
-	task_base<T>::return_type await_resume() const { return this->_vt->_h.promise()._value.value(); }
+	task_base<T>::return_type await_resume() const { return std::move(this->_vt->_h.promise()._value).value(); }
 
 	task(std::shared_ptr<vtask<T>> &&vt) :
 		task_base<T>(std::move(vt))
@@ -223,13 +200,6 @@ task<T> task_promise_type<T>::get_return_object()
 	auto vt = std::make_shared<vtask<T>>(std::coroutine_handle<task_promise_type<T>>::from_promise(*this));
 	this->_vt = std::weak_ptr(vt);
 	return task<T>(std::move(vt));
-}
-
-task<void> task_promise_type<void>::get_return_object()
-{
-	auto vt = std::make_shared<vtask<void>>(std::coroutine_handle<task_promise_type<void>>::from_promise(*this));
-	this->_vt = std::weak_ptr(vt);
-	return task<void>(std::move(vt));
 }
 
 struct timer_task
@@ -260,18 +230,17 @@ struct timer_task
 	}
 };
 
-timer_task async_sleep_until(std::chrono::steady_clock::time_point time)
-{
-	return timer_task(time);
-}
-
-timer_task async_sleep(std::chrono::duration<int64_t, std::nano> dur)
-{
-	return async_sleep_until(std::chrono::steady_clock::now() + dur);
-}
+timer_task async_sleep_until(std::chrono::steady_clock::time_point time);
+timer_task async_sleep(std::chrono::duration<int64_t, std::nano> dur);
 
 struct vjoin_task : vtask_base
 {
+	context *_ctx = nullptr;
+	std::weak_ptr<vtask_base> _parent_vt;
+
+	size_t _counter = 0;
+	size_t _max_counter;
+
 	vjoin_task(size_t max_counter) :
 		_max_counter(max_counter)
 	{
@@ -285,12 +254,6 @@ struct vjoin_task : vtask_base
 				this->_ctx->_add_ready_task(this->_parent_vt.lock());
 		}
 	}
-
-	context *_ctx = nullptr;
-	std::weak_ptr<vtask_base> _parent_vt;
-
-	size_t _counter = 0;
-	size_t _max_counter;
 };
 
 struct tmp_task_t
@@ -369,6 +332,120 @@ join_task<TTasks...> join(TTasks&&... tasks)
 	return join_task(std::forward<TTasks>(tasks)...);
 }
 
+struct vrecv_task;
+
+struct recv_task
+{
+	std::shared_ptr<vrecv_task> _vt;
+	socket_t *_client = nullptr;
+
+	using return_type = std::vector<char>;
+
+	constexpr bool await_ready() const noexcept { return false; }
+	return_type await_resume();
+
+	template <typename K>
+	void await_suspend(std::coroutine_handle<K> parent_cor) const
+	{
+		auto &parent_prom = parent_cor.promise();
+		auto ctx = parent_prom._ctx;
+
+		this->_start(ctx, parent_prom._vt);
+	}
+
+	void _start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const;
+};
+
+struct vsend_task;
+
+struct send_task
+{
+	std::shared_ptr<vsend_task> _vt;
+	socket_t *_client = nullptr;
+
+	using return_type = std::vector<char>;
+
+	constexpr bool await_ready() const noexcept { return false; }
+	return_type await_resume();
+
+	template <typename K>
+	void await_suspend(std::coroutine_handle<K> parent_cor) const
+	{
+		auto &parent_prom = parent_cor.promise();
+		auto ctx = parent_prom._ctx;
+
+		this->_start(ctx, parent_prom._vt);
+	}
+
+	void _start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const;
+};
+
+struct tcp_client
+{
+	std::unique_ptr<socket_t> _sock;
+
+	recv_task recv(std::vector<char> &&buffer);
+	send_task send(std::vector<char> &&buffer);
+
+	task<size_t> send_all(std::vector<char> &&buffer)
+	{
+		while (!buffer.empty())
+			buffer = co_await this->send(std::move(buffer));
+
+		co_return 0;
+	}
+
+	tcp_client() = default;
+	tcp_client(tcp_client &&);
+	~tcp_client();
+};
+
+struct vinit_task_base : vtask_base
+{
+	context *_ctx = nullptr;
+};
+
+struct vaccept_task;
+
+struct accept_task
+{
+	std::shared_ptr<vaccept_task> _vt;
+	socket_t *_server = nullptr;
+
+	using return_type = tcp_client;
+
+	constexpr bool await_ready() const noexcept { return false; }
+	return_type await_resume();
+
+	template <typename K>
+	void await_suspend(std::coroutine_handle<K> parent_cor) const
+	{
+		auto &parent_prom = parent_cor.promise();
+		auto ctx = parent_prom._ctx;
+
+		this->_start(ctx, parent_prom._vt);
+	}
+
+	void _start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const;
+
+	accept_task() = default;
+	accept_task(accept_task &&);
+	~accept_task();
+};
+
+struct tcp_server
+{
+	std::unique_ptr<socket_t> _sock;
+
+	tcp_server() = default;
+	tcp_server(tcp_server &&);
+	~tcp_server();
+
+	static tcp_server create(const char *addr, uint16_t port);
+
+	accept_task accept();
+};
+
 } // namespace __internal
 
 using __internal::task;
@@ -378,6 +455,8 @@ using __internal::async_sleep;
 using __internal::async_sleep_until;
 using __internal::join;
 using __internal::wrapper;
+using __internal::tcp_server;
+using __internal::accept_task;
 
 } // namespace evl
 

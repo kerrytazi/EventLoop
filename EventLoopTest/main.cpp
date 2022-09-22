@@ -55,10 +55,30 @@ evl::task<int> async_main()
 	co_return w;
 }
 
+evl::task<void> async_server()
+{
+	auto listener = evl::tcp_server::create("0.0.0.0", 5150);
+
+	std::vector<char> data;
+
+	while (42)
+	{
+		std::vector<char> data(128);
+
+		auto client = co_await listener.accept();
+		data = co_await client.recv(std::move(data));
+		auto wrote = co_await client.send_all(std::move(data));
+	}
+}
 
 int main()
 {
 	int b = 0;
+
+	{
+		evl::context ctx;
+		ctx.run(async_server());
+	}
 
 	// for (int i = 0; i < 10; ++i)
 	{
