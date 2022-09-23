@@ -6,6 +6,9 @@
 #pragma comment(lib, "ws2_32.lib")
 
 
+// static constexpr ULONG_PTR CK_TIMER = 1;
+
+
 struct wsa_initer
 {
 	WSADATA wsd{ 0 };
@@ -125,7 +128,6 @@ enum class overlapped_type
 	o_connect,
 	o_recv,
 	o_send,
-	o_timer,
 };
 
 struct overlapped_t
@@ -167,6 +169,8 @@ struct evl::__internal::__network::socket_t
 			case overlapped_type::o_recv: return reinterpret_cast<socket_t *>(reinterpret_cast<char *>(ovlp) - offsetof(socket_t, ovlp_recv));
 			case overlapped_type::o_send: return reinterpret_cast<socket_t *>(reinterpret_cast<char *>(ovlp) - offsetof(socket_t, ovlp_send));
 		}
+
+		__assume(false);
 	}
 
 	socket_t(overlapped_type typ) :
@@ -337,25 +341,41 @@ struct evl::__internal::__network::vsend_task : evl::__internal::vtask_base
 	}
 };
 
+static NTSTATUS(__stdcall *ZwSetTimerResolution)(IN ULONG RequestedResolution, IN BOOLEAN Set, OUT PULONG ActualResolution) = (NTSTATUS(__stdcall *)(ULONG, BOOLEAN, PULONG)) GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "ZwSetTimerResolution");
+
 void evl::__internal::context::_impl_init()
 {
 	wsa_initer::init();
 	(void)comp_port::get_singleton();
 	(void)winsock_ex::get_singleton();
+
+	{
+		ULONG actualResolution;
+		ZwSetTimerResolution(1, 1, &actualResolution);
+	}
 }
+
+/*
+static void timer_callback(void *arg, DWORD timer_low, DWORD timer_high)
+{
+	HANDLE comp_port = (HANDLE)arg;
+	::PostQueuedCompletionStatus(comp_port, 0, CK_TIMER, nullptr);
+
+	// NOTE: post timer to read_tasks instead of CP?
+}
+*/
+
 
 void evl::__internal::context::_impl_waiting_loop()
 {
 	HANDLE comp_port = comp_port::get_singleton().val;
 	DWORD timeout = INFINITE;
-
 	bool wait_timer = !this->_timers.empty();
 
 	if (wait_timer)
 	{
-		auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(this->_timers.back()._time - std::chrono::steady_clock::now()).count();
-
-		if (delta <= 0)
+		auto delta = this->_timers.back()._time - std::chrono::system_clock::now();
+		if (delta <= decltype(delta)(0))
 		{
 			auto t = std::move(this->_timers.back());
 			this->_timers.pop_back();
@@ -363,64 +383,88 @@ void evl::__internal::context::_impl_waiting_loop()
 			return;
 		}
 
-		timeout = (DWORD)delta;
-	}
+		timeout = (DWORD)std::chrono::duration_cast<std::chrono::milliseconds>(delta).count();
 
-	// Microsoft why there are still no IOCP timers?
-	/*
-	if (!this->_timers.empty())
-	{
-		timer = ::CreateWaitableTimerW(NULL, TRUE, NULL);
+		if (timeout == 0)
+			timeout = 1;
+
+		/*
+		{
+			auto t = std::move(this->_timers.back());
+			this->_timers.pop_back();
+			std::this_thread::sleep_until(t._time);
+			this->_add_ready_task(t._task);
+			return;
+		}
+		*/
+
+		/*
+		HANDLE timer = ::CreateWaitableTimerW(NULL, TRUE, NULL);
 		if (timer == nullptr)
 			throw 1;
 
-		LARGE_INTEGER li_timeout;
-		li_timeout.QuadPart = this->_timers.back()._time.time_since_epoch().count() / 100;
-		// SetWaitableTimer resolution time is 100ns
+		LARGE_INTEGER li_timeout{ 0 };
+		li_timeout.QuadPart = this->_timers.back()._time.time_since_epoch().count() + 116444736000000000LL;
 
-		if (::SetWaitableTimer(timer, &li_timeout, 0, nullptr, nullptr, FALSE) == 0)
+		if (::SetWaitableTimer(timer, &li_timeout, 0, &timer_callback, comp_port, FALSE) == 0)
 			throw 1;
-
-		if (::CreateIoCompletionPort(timer, comp_port, 0, 0) == nullptr)
-			throw 1;
-
-		// timeout = (until.value() - std::chrono::steady_clock::now()).;
+		*/
 	}
-	*/
 
 	while (42)
 	{
+		/*
+		ULONG removed = 0;
+		OVERLAPPED_ENTRY entry{ 0 };
+		BOOL success = ::GetQueuedCompletionStatusEx(comp_port, &entry, 1, &removed, timeout, TRUE);
+
+		if (success == FALSE)
+		{
+			DWORD err = ::GetLastError();
+
+			if (err == WAIT_IO_COMPLETION)
+				continue; // alerted by ACP. don't do anything. wait for overlapped event
+
+			if (err == ERROR_TIMEOUT)
+				break; // we already handled at least one event and can continue
+
+			throw 1; // wtf
+		}
+
+		ULONG_PTR completion_key = entry.lpCompletionKey;
+		overlapped_t *ovlp = reinterpret_cast<overlapped_t *>(entry.lpOverlapped);
+		DWORD bytes_transfered = entry.dwNumberOfBytesTransferred;
+		*/
+
 		DWORD bytes_transfered = 0;
 		ULONG_PTR completion_key = 0;
 		overlapped_t *ovlp = nullptr;
 		BOOL success = ::GetQueuedCompletionStatus(comp_port, &bytes_transfered, &completion_key, reinterpret_cast<OVERLAPPED **>(&ovlp), timeout);
-		// PostQueuedCompletionStatus
-
 		timeout = 0;
 
 		if (success == FALSE)
 		{
-			if (ovlp)
-			{
-				auto s = evl::__internal::__network::socket_t::from(ovlp);
-				::closesocket(s->sock);
-				// s->parent->remove_client(s);
-
-				continue;
-			}
-
-			// timeout
-
 			if (wait_timer)
 			{
 				auto t = std::move(this->_timers.back());
 				this->_timers.pop_back();
 				this->_add_ready_task(t._task);
+				return;
 			}
 
-			// we already handled at least one event and can continue
-			break;
+			throw 1;
 		}
+
+		/*
+		if (completion_key == CK_TIMER)
+		{
+			auto t = std::move(this->_timers.back());
+			this->_timers.pop_back();
+			this->_add_ready_task(t._task);
+
+			return;
+		}
+		*/
 
 		if (ovlp->type == overlapped_type::o_accept)
 		{

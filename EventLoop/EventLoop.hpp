@@ -50,7 +50,7 @@ struct timer_info
 {
 	context *_ctx;
 	std::shared_ptr<vtask_base> _task;
-	std::chrono::steady_clock::time_point _time;
+	std::chrono::system_clock::time_point _time;
 };
 
 struct context
@@ -205,9 +205,9 @@ struct timer_task
 {
 	using return_type = void;
 
-	std::chrono::steady_clock::time_point _time;
+	std::chrono::system_clock::time_point _time;
 
-	timer_task(std::chrono::steady_clock::time_point time) :
+	timer_task(std::chrono::system_clock::time_point time) :
 		_time(time)
 	{}
 
@@ -229,8 +229,8 @@ struct timer_task
 	}
 };
 
-timer_task async_sleep_until(std::chrono::steady_clock::time_point time);
-timer_task async_sleep(std::chrono::duration<int64_t, std::nano> dur);
+timer_task async_sleep_until(std::chrono::system_clock::time_point time);
+timer_task async_sleep(std::chrono::system_clock::duration dur);
 
 struct vjoin_task : vtask_base
 {

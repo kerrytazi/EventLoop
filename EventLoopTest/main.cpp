@@ -23,11 +23,11 @@ evl::task<void> not_long_work2()
 	auto j = co_await evl::join(evl::async_sleep(std::chrono::seconds(1)), empty_work(), empty_work_int());
 	std::cout << "asd " << std::get<2>(j).val << "\n";
 
-	for (int i = 0; i < 3; ++i)
+	for (int i = 0; i < 30; ++i)
 	{
 		const auto now = std::chrono::system_clock::now();
 		std::cout << std::format("{:%F %T}", now) << '\n';
-		co_await evl::async_sleep(std::chrono::milliseconds(1000));
+		co_await evl::async_sleep(std::chrono::milliseconds(1));
 	}
 
 	co_return;
