@@ -6,9 +6,6 @@
 #pragma comment(lib, "ws2_32.lib")
 
 
-// static constexpr ULONG_PTR CK_TIMER = 1;
-
-
 struct wsa_initer
 {
 	WSADATA wsd{ 0 };
@@ -355,17 +352,6 @@ void evl::__internal::context::_impl_init()
 	}
 }
 
-/*
-static void timer_callback(void *arg, DWORD timer_low, DWORD timer_high)
-{
-	HANDLE comp_port = (HANDLE)arg;
-	::PostQueuedCompletionStatus(comp_port, 0, CK_TIMER, nullptr);
-
-	// NOTE: post timer to read_tasks instead of CP?
-}
-*/
-
-
 void evl::__internal::context::_impl_waiting_loop()
 {
 	HANDLE comp_port = comp_port::get_singleton().val;
@@ -387,55 +373,10 @@ void evl::__internal::context::_impl_waiting_loop()
 
 		if (timeout == 0)
 			timeout = 1;
-
-		/*
-		{
-			auto t = std::move(this->_timers.back());
-			this->_timers.pop_back();
-			std::this_thread::sleep_until(t._time);
-			this->_add_ready_task(t._task);
-			return;
-		}
-		*/
-
-		/*
-		HANDLE timer = ::CreateWaitableTimerW(NULL, TRUE, NULL);
-		if (timer == nullptr)
-			throw 1;
-
-		LARGE_INTEGER li_timeout{ 0 };
-		li_timeout.QuadPart = this->_timers.back()._time.time_since_epoch().count() + 116444736000000000LL;
-
-		if (::SetWaitableTimer(timer, &li_timeout, 0, &timer_callback, comp_port, FALSE) == 0)
-			throw 1;
-		*/
 	}
 
 	while (42)
 	{
-		/*
-		ULONG removed = 0;
-		OVERLAPPED_ENTRY entry{ 0 };
-		BOOL success = ::GetQueuedCompletionStatusEx(comp_port, &entry, 1, &removed, timeout, TRUE);
-
-		if (success == FALSE)
-		{
-			DWORD err = ::GetLastError();
-
-			if (err == WAIT_IO_COMPLETION)
-				continue; // alerted by ACP. don't do anything. wait for overlapped event
-
-			if (err == ERROR_TIMEOUT)
-				break; // we already handled at least one event and can continue
-
-			throw 1; // wtf
-		}
-
-		ULONG_PTR completion_key = entry.lpCompletionKey;
-		overlapped_t *ovlp = reinterpret_cast<overlapped_t *>(entry.lpOverlapped);
-		DWORD bytes_transfered = entry.dwNumberOfBytesTransferred;
-		*/
-
 		DWORD bytes_transfered = 0;
 		ULONG_PTR completion_key = 0;
 		overlapped_t *ovlp = nullptr;
@@ -449,22 +390,10 @@ void evl::__internal::context::_impl_waiting_loop()
 				auto t = std::move(this->_timers.back());
 				this->_timers.pop_back();
 				this->_add_ready_task(t._task);
-				return;
 			}
-
-			throw 1;
-		}
-
-		/*
-		if (completion_key == CK_TIMER)
-		{
-			auto t = std::move(this->_timers.back());
-			this->_timers.pop_back();
-			this->_add_ready_task(t._task);
 
 			return;
 		}
-		*/
 
 		if (ovlp->type == overlapped_type::o_accept)
 		{
@@ -490,16 +419,7 @@ void evl::__internal::context::_impl_waiting_loop()
 		}
 
 		if (bytes_transfered == 0)
-		{
-			if (ovlp)
-			{
-				auto s = evl::__internal::__network::socket_t::from(ovlp);
-				::closesocket(s->sock);
-				// s->parent->remove_client(s);
-			}
-
-			continue;
-		}
+			throw 1;
 
 		if (ovlp->type == overlapped_type::o_recv)
 		{

@@ -106,13 +106,13 @@ int main()
 		ctx.run(async_context());
 	}
 
-	if (false)
+	if (true)
 	{
 		evl::context ctx;
 		ctx.run(async_server_client());
 	}
 
-	// for (int i = 0; i < 10; ++i)
+	if (false)
 	{
 		evl::context ctx;
 		auto result = ctx.run(async_tasks());
