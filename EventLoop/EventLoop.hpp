@@ -53,16 +53,20 @@ struct timer_info
 	std::chrono::system_clock::time_point _time;
 };
 
+struct context_impl
+{
+	virtual ~context_impl() = default;
+	virtual void waiting_loop() = 0;
+};
+
 struct context
 {
+	std::unique_ptr<context_impl> _impl;
 	std::vector<std::shared_ptr<vtask_base>> _ready_tasks;
 	std::vector<timer_info> _timers;
 
-	friend struct task_promise_type_base;
-	friend struct timer_task;
-	friend struct vjoin_task;
 	template <typename T>
-	friend struct task_base;
+	T *_get_impl() const { return static_cast<T *>(this->_impl.get()); }
 
 	void _add_timer(timer_info tim)
 	{
@@ -75,9 +79,6 @@ struct context
 		this->_ready_tasks.push_back(vt);
 	}
 
-	void _impl_waiting_loop();
-	void _impl_init();
-
 	void _loop(std::shared_ptr<vtask_base> main_vt, std::coroutine_handle<> main_handle);
 
 	template <typename T>
@@ -87,6 +88,8 @@ struct context
 		this->_loop(t._vt, t._vt->_h);
 		return t._vt->_h.promise()._get_result();
 	}
+
+	context();
 };
 
 struct task_promise_type_base

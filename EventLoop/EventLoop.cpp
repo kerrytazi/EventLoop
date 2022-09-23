@@ -3,8 +3,6 @@
 
 void evl::__internal::context::_loop(std::shared_ptr<vtask_base> main_vt, std::coroutine_handle<> main_handle)
 {
-	this->_impl_init();
-
 	this->_add_ready_task(main_vt);
 
 	while (!main_handle.done())
@@ -19,7 +17,7 @@ void evl::__internal::context::_loop(std::shared_ptr<vtask_base> main_vt, std::c
 		if (main_handle.done())
 			break;
 
-		this->_impl_waiting_loop();
+		this->_impl->waiting_loop();
 	}
 }
 

@@ -58,7 +58,7 @@ evl::task<int> async_tasks()
 
 evl::task<void> async_server()
 {
-	auto listener = evl::network::listen("0.0.0.0", 5150);
+	auto listener = co_await evl::network::listen("0.0.0.0", 5150);
 
 	while (42)
 	{

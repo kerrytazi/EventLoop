@@ -29,32 +29,6 @@ struct wsa_initer
 	}
 };
 
-struct comp_port
-{
-	HANDLE val = nullptr;
-	int err = ERROR_SUCCESS;
-
-	comp_port()
-	{
-		this->val = ::CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 0);
-
-		if (this->val == nullptr)
-			this->err = ::GetLastError();
-	}
-
-	~comp_port()
-	{
-		if (err != ERROR_SUCCESS)
-			::CloseHandle(this->val);
-	}
-
-	static comp_port &get_singleton()
-	{
-		static comp_port instance;
-		return instance;
-	}
-};
-
 struct winsock_ex
 {
 	LPFN_ACCEPTEX accept_ex = nullptr;
@@ -134,6 +108,11 @@ struct overlapped_t
 
 	overlapped_t() = delete;
 	overlapped_t(overlapped_type typ) : type(typ) {}
+};
+
+struct vinit_task_base : evl::__internal::vtask_base
+{
+	evl::__internal::context *_ctx = nullptr;
 };
 
 struct evl::__internal::__network::socket_t
@@ -288,7 +267,14 @@ struct evl::__internal::__network::socket_t
 	}
 };
 
-struct evl::__internal::__network::vaccept_task : evl::__internal::__network::vinit_task_base
+struct evl::__internal::__network::vlisten_task : vtask_base
+{
+	tcp_server _value;
+
+	virtual void resume() override {}
+};
+
+struct evl::__internal::__network::vaccept_task : vinit_task_base
 {
 	std::weak_ptr<vtask_base> _parent_vt;
 	tcp_client _value;
@@ -300,7 +286,7 @@ struct evl::__internal::__network::vaccept_task : evl::__internal::__network::vi
 	}
 };
 
-struct evl::__internal::__network::vconnect_task : evl::__internal::__network::vinit_task_base
+struct evl::__internal::__network::vconnect_task : vinit_task_base
 {
 	std::weak_ptr<vtask_base> _parent_vt;
 	tcp_client _value;
@@ -340,176 +326,143 @@ struct evl::__internal::__network::vsend_task : evl::__internal::vtask_base
 
 static NTSTATUS(__stdcall *ZwSetTimerResolution)(IN ULONG RequestedResolution, IN BOOLEAN Set, OUT PULONG ActualResolution) = (NTSTATUS(__stdcall *)(ULONG, BOOLEAN, PULONG)) GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "ZwSetTimerResolution");
 
-void evl::__internal::context::_impl_init()
+struct win32_new_context_impl : evl::__internal::context_impl
 {
-	wsa_initer::init();
-	(void)comp_port::get_singleton();
-	(void)winsock_ex::get_singleton();
+	HANDLE comp_port = nullptr;
+	evl::__internal::context *ctx = nullptr;
 
+	win32_new_context_impl(evl::__internal::context *_ctx) :
+		ctx(_ctx)
 	{
-		ULONG actualResolution;
-		ZwSetTimerResolution(1, 1, &actualResolution);
-	}
-}
+		this->comp_port = ::CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 0);
 
-void evl::__internal::context::_impl_waiting_loop()
-{
-	HANDLE comp_port = comp_port::get_singleton().val;
-	DWORD timeout = INFINITE;
-	bool wait_timer = !this->_timers.empty();
-
-	if (wait_timer)
-	{
-		auto delta = this->_timers.back()._time - std::chrono::system_clock::now();
-		if (delta <= decltype(delta)(0))
-		{
-			auto t = std::move(this->_timers.back());
-			this->_timers.pop_back();
-			this->_add_ready_task(t._task);
-			return;
-		}
-
-		timeout = (DWORD)std::chrono::duration_cast<std::chrono::milliseconds>(delta).count();
-
-		if (timeout == 0)
-			timeout = 1;
-	}
-
-	while (42)
-	{
-		DWORD bytes_transfered = 0;
-		ULONG_PTR completion_key = 0;
-		overlapped_t *ovlp = nullptr;
-		BOOL success = ::GetQueuedCompletionStatus(comp_port, &bytes_transfered, &completion_key, reinterpret_cast<OVERLAPPED **>(&ovlp), timeout);
-		timeout = 0;
-
-		if (success == FALSE)
-		{
-			if (wait_timer)
-			{
-				auto t = std::move(this->_timers.back());
-				this->_timers.pop_back();
-				this->_add_ready_task(t._task);
-			}
-
-			return;
-		}
-
-		if (ovlp->type == overlapped_type::o_accept)
-		{
-			auto s = evl::__internal::__network::socket_t::from(ovlp);
-
-			auto vt = std::static_pointer_cast<evl::__internal::__network::vaccept_task>(s->_vt_init.lock());
-			s->_vt_init = {};
-			s->addr.s4 = *(sockaddr_in *)(vt->_accept_buffer.data() + (sizeof(sockaddr_t::s4) + 16));
-			vt->_ctx->_add_ready_task(vt);
-
-			continue;
-		}
-
-		if (ovlp->type == overlapped_type::o_connect)
-		{
-			auto s = evl::__internal::__network::socket_t::from(ovlp);
-
-			auto vt = std::static_pointer_cast<evl::__internal::__network::vconnect_task>(s->_vt_init.lock());
-			s->_vt_init = {};
-			vt->_ctx->_add_ready_task(vt);
-
-			continue;
-		}
-
-		if (bytes_transfered == 0)
+		if (this->comp_port == nullptr)
 			throw 1;
 
-		if (ovlp->type == overlapped_type::o_recv)
+		wsa_initer::init();
+		(void)winsock_ex::get_singleton();
+
 		{
-			auto s = evl::__internal::__network::socket_t::from(ovlp);
-
-			auto vt = s->_vt_recv.lock();
-			s->_vt_recv = {};
-			vt->_done = bytes_transfered;
-			vt->_ctx->_add_ready_task(vt);
-
-			continue;
-		}
-
-		if (ovlp->type == overlapped_type::o_send)
-		{
-			auto s = evl::__internal::__network::socket_t::from(ovlp);
-
-			auto vt = s->_vt_send.lock();
-			s->_vt_recv = {};
-			vt->_done = bytes_transfered;
-			vt->_ctx->_add_ready_task(vt);
-
-			continue;
+			ULONG actualResolution;
+			ZwSetTimerResolution(1, 1, &actualResolution);
 		}
 	}
-}
 
-evl::__internal::__network::recv_task::return_type evl::__internal::__network::recv_task::await_resume() { return this->_vt->_done; }
+	virtual void waiting_loop() override
+	{
+		DWORD timeout = INFINITE;
+		bool wait_timer = !this->ctx->_timers.empty();
 
-void evl::__internal::__network::recv_task::_start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const
+		if (wait_timer)
+		{
+			auto delta = this->ctx->_timers.back()._time - std::chrono::system_clock::now();
+			if (delta <= decltype(delta)(0))
+			{
+				auto t = std::move(this->ctx->_timers.back());
+				this->ctx->_timers.pop_back();
+				this->ctx->_add_ready_task(t._task);
+				return;
+			}
+
+			timeout = (DWORD)std::chrono::duration_cast<std::chrono::milliseconds>(delta).count();
+
+			if (timeout == 0)
+				timeout = 1;
+		}
+
+		while (42)
+		{
+			DWORD bytes_transfered = 0;
+			ULONG_PTR completion_key = 0;
+			overlapped_t *ovlp = nullptr;
+			BOOL success = ::GetQueuedCompletionStatus(this->comp_port, &bytes_transfered, &completion_key, reinterpret_cast<OVERLAPPED **>(&ovlp), timeout);
+			timeout = 0;
+
+			if (success == FALSE)
+			{
+				if (wait_timer)
+				{
+					auto t = std::move(this->ctx->_timers.back());
+					this->ctx->_timers.pop_back();
+					this->ctx->_add_ready_task(t._task);
+				}
+
+				return;
+			}
+
+			if (ovlp->type == overlapped_type::o_accept)
+			{
+				auto s = evl::__internal::__network::socket_t::from(ovlp);
+
+				auto vt = std::static_pointer_cast<evl::__internal::__network::vaccept_task>(s->_vt_init.lock());
+				s->_vt_init = {};
+				s->addr.s4 = *(sockaddr_in *)(vt->_accept_buffer.data() + (sizeof(sockaddr_t::s4) + 16));
+				vt->_ctx->_add_ready_task(vt);
+
+				continue;
+			}
+
+			if (ovlp->type == overlapped_type::o_connect)
+			{
+				auto s = evl::__internal::__network::socket_t::from(ovlp);
+
+				auto vt = std::static_pointer_cast<evl::__internal::__network::vconnect_task>(s->_vt_init.lock());
+				s->_vt_init = {};
+				vt->_ctx->_add_ready_task(vt);
+
+				continue;
+			}
+
+			if (bytes_transfered == 0)
+				throw 1;
+
+			if (ovlp->type == overlapped_type::o_recv)
+			{
+				auto s = evl::__internal::__network::socket_t::from(ovlp);
+
+				auto vt = s->_vt_recv.lock();
+				s->_vt_recv = {};
+				vt->_done = bytes_transfered;
+				vt->_ctx->_add_ready_task(vt);
+
+				continue;
+			}
+
+			if (ovlp->type == overlapped_type::o_send)
+			{
+				auto s = evl::__internal::__network::socket_t::from(ovlp);
+
+				auto vt = s->_vt_send.lock();
+				s->_vt_recv = {};
+				vt->_done = bytes_transfered;
+				vt->_ctx->_add_ready_task(vt);
+
+				continue;
+			}
+		}
+	}
+};
+
+evl::__internal::context::context() :
+	_impl(std::make_unique<win32_new_context_impl>(this))
 {
-	this->_vt->_ctx = ctx;
-	this->_vt->_parent_vt = std::move(parent_vt);
-
-	this->_client->recv_async(&this->_vt->_wsa_buf);
-	this->_client->_vt_recv = this->_vt;
 }
 
-evl::__internal::__network::recv_task evl::__internal::__network::tcp_client::recv(char *data, size_t size)
+// listen
+evl::__internal::__network::listen_task::return_type evl::__internal::__network::listen_task::await_resume() { return std::move(this->_vt->_value); }
+
+void evl::__internal::__network::listen_task::_start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const
 {
-	recv_task t;
+	this->_vt->_value._sock = socket_t::create_listen(this->_addr, this->_port, ctx->_get_impl<win32_new_context_impl>()->comp_port);
 
-	t._vt = std::make_shared<vrecv_task>();
-	t._client = this->_sock.get();
-	t._vt->_wsa_buf.buf = data;
-	t._vt->_wsa_buf.len = (ULONG)size;
-
-	return t;
+	// no waiting
+	ctx->_add_ready_task(parent_vt.lock());
 }
 
-evl::__internal::__network::send_task::return_type evl::__internal::__network::send_task::await_resume() { return this->_vt->_done; }
+evl::__internal::__network::listen_task::listen_task(listen_task &&) = default;
+evl::__internal::__network::listen_task::~listen_task() = default;
 
-void evl::__internal::__network::send_task::_start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const
-{
-	this->_vt->_ctx = ctx;
-	this->_vt->_parent_vt = std::move(parent_vt);
-
-	this->_client->send_async(&this->_vt->_wsa_buf);
-	this->_client->_vt_send = this->_vt;
-}
-
-evl::__internal::__network::send_task evl::__internal::__network::tcp_client::send(const char *data, size_t size)
-{
-	send_task t;
-
-	t._vt = std::make_shared<vsend_task>();
-	t._client = this->_sock.get();
-	t._vt->_wsa_buf.buf = const_cast<char *>(data);
-	t._vt->_wsa_buf.len = (ULONG)size;
-
-	return t;
-}
-
-evl::__internal::__network::connect_task::return_type evl::__internal::__network::connect_task::await_resume() { return std::move(this->_vt->_value); }
-
-void evl::__internal::__network::connect_task::_start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const
-{
-	this->_vt->_ctx = ctx;
-	this->_vt->_parent_vt = std::move(parent_vt);
-
-	this->_vt->_value._sock = socket_t::create_connect(this->_addr, this->_port, comp_port::get_singleton().val);
-	this->_vt->_value._sock->_vt_init = this->_vt;
-}
-
-evl::__internal::__network::connect_task::connect_task(connect_task &&) = default;
-evl::__internal::__network::connect_task::~connect_task() = default;
-
-evl::__internal::__network::tcp_client::tcp_client(tcp_client &&) = default;
-evl::__internal::__network::tcp_client::~tcp_client() = default;
-
+// accept
 evl::__internal::__network::accept_task::return_type evl::__internal::__network::accept_task::await_resume() { return std::move(this->_vt->_value); }
 
 void evl::__internal::__network::accept_task::_start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const
@@ -526,9 +479,46 @@ void evl::__internal::__network::accept_task::_start(context *ctx, std::weak_ptr
 evl::__internal::__network::accept_task::accept_task(accept_task &&) = default;
 evl::__internal::__network::accept_task::~accept_task() = default;
 
-evl::__internal::__network::tcp_server::tcp_server(tcp_server &&) = default;
-evl::__internal::__network::tcp_server::~tcp_server() = default;
+// connect
+evl::__internal::__network::connect_task::return_type evl::__internal::__network::connect_task::await_resume() { return std::move(this->_vt->_value); }
 
+void evl::__internal::__network::connect_task::_start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const
+{
+	this->_vt->_ctx = ctx;
+	this->_vt->_parent_vt = std::move(parent_vt);
+
+	this->_vt->_value._sock = socket_t::create_connect(this->_addr, this->_port, ctx->_get_impl<win32_new_context_impl>()->comp_port);
+	this->_vt->_value._sock->_vt_init = this->_vt;
+}
+
+evl::__internal::__network::connect_task::connect_task(connect_task &&) = default;
+evl::__internal::__network::connect_task::~connect_task() = default;
+
+// recv
+evl::__internal::__network::recv_task::return_type evl::__internal::__network::recv_task::await_resume() { return this->_vt->_done; }
+
+void evl::__internal::__network::recv_task::_start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const
+{
+	this->_vt->_ctx = ctx;
+	this->_vt->_parent_vt = std::move(parent_vt);
+
+	this->_client->recv_async(&this->_vt->_wsa_buf);
+	this->_client->_vt_recv = this->_vt;
+}
+
+// send
+evl::__internal::__network::send_task::return_type evl::__internal::__network::send_task::await_resume() { return this->_vt->_done; }
+
+void evl::__internal::__network::send_task::_start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const
+{
+	this->_vt->_ctx = ctx;
+	this->_vt->_parent_vt = std::move(parent_vt);
+
+	this->_client->send_async(&this->_vt->_wsa_buf);
+	this->_client->_vt_send = this->_vt;
+}
+
+// tcp_server
 evl::__internal::__network::accept_task evl::__internal::__network::tcp_server::accept()
 {
 	accept_task t;
@@ -539,15 +529,50 @@ evl::__internal::__network::accept_task evl::__internal::__network::tcp_server::
 	return t;
 }
 
-evl::__internal::__network::tcp_server evl::__internal::__network::listen(const char *addr, uint16_t port)
+evl::__internal::__network::tcp_server::tcp_server(tcp_server &&) = default;
+evl::__internal::__network::tcp_server::~tcp_server() = default;
+
+// tcp_client
+evl::__internal::__network::recv_task evl::__internal::__network::tcp_client::recv(char *data, size_t size)
 {
-	tcp_server s;
+	recv_task t;
 
-	s._sock = socket_t::create_listen(addr, port, comp_port::get_singleton().val);
+	t._vt = std::make_shared<vrecv_task>();
+	t._client = this->_sock.get();
+	t._vt->_wsa_buf.buf = data;
+	t._vt->_wsa_buf.len = (ULONG)size;
 
-	return s;
+	return t;
 }
 
+evl::__internal::__network::send_task evl::__internal::__network::tcp_client::send(const char *data, size_t size)
+{
+	send_task t;
+
+	t._vt = std::make_shared<vsend_task>();
+	t._client = this->_sock.get();
+	t._vt->_wsa_buf.buf = const_cast<char *>(data);
+	t._vt->_wsa_buf.len = (ULONG)size;
+
+	return t;
+}
+
+evl::__internal::__network::tcp_client::tcp_client(tcp_client &&) = default;
+evl::__internal::__network::tcp_client::~tcp_client() = default;
+
+// listen
+evl::__internal::__network::listen_task evl::__internal::__network::listen(const char *addr, uint16_t port)
+{
+	listen_task t;
+
+	t._vt = std::make_shared<vlisten_task>();
+	t._addr = addr;
+	t._port = port;
+
+	return t;
+}
+
+// connect
 evl::__internal::__network::connect_task evl::__internal::__network::connect(const char *addr, uint16_t port)
 {
 	connect_task t;

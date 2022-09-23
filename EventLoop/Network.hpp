@@ -14,11 +14,7 @@ namespace __network
 
 struct socket_t;
 
-struct vinit_task_base : vtask_base
-{
-	context *_ctx = nullptr;
-};
-
+struct vlisten_task;
 struct vaccept_task;
 struct vconnect_task;
 struct vrecv_task;
@@ -27,6 +23,33 @@ struct vsend_task;
 struct tcp_server;
 struct tcp_client;
 
+
+struct listen_task
+{
+	std::shared_ptr<vlisten_task> _vt;
+	const char *_addr;
+	uint16_t _port;
+
+	using return_type = tcp_server;
+
+	constexpr bool await_ready() const noexcept { return false; }
+	return_type await_resume();
+
+	template <typename K>
+	void await_suspend(std::coroutine_handle<K> parent_cor) const
+	{
+		auto &parent_prom = parent_cor.promise();
+		auto ctx = parent_prom._ctx;
+
+		this->_start(ctx, parent_prom._vt);
+	}
+
+	void _start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const;
+
+	listen_task() = default;
+	listen_task(listen_task &&);
+	~listen_task();
+};
 
 struct accept_task
 {
@@ -174,7 +197,7 @@ struct tcp_client
 	~tcp_client();
 };
 
-tcp_server listen(const char *addr, uint16_t port);
+listen_task listen(const char *addr, uint16_t port);
 connect_task connect(const char *addr, uint16_t port);
 
 } // namespace __network
@@ -184,6 +207,7 @@ connect_task connect(const char *addr, uint16_t port);
 namespace network
 {
 
+using __internal::__network::listen_task;
 using __internal::__network::accept_task;
 using __internal::__network::connect_task;
 using __internal::__network::recv_task;
