@@ -32,6 +32,7 @@ struct wsa_initer
 struct winsock_ex
 {
 	LPFN_ACCEPTEX accept_ex = nullptr;
+	LPFN_GETACCEPTEXSOCKADDRS get_accept_ex_sockaddrs = nullptr;
 	LPFN_CONNECTEX connect_ex = nullptr;
 	LPFN_DISCONNECTEX disconnect_ex = nullptr;
 	int err = 0;
@@ -48,6 +49,17 @@ struct winsock_ex
 			SIO_GET_EXTENSION_FUNCTION_POINTER,
 			&func_guid, sizeof(func_guid),
 			&this->accept_ex, sizeof(this->accept_ex),
+			&bytes_returned, NULL, NULL) != 0)
+		{
+			this->err = ::WSAGetLastError();
+			return;
+		}
+
+		func_guid = WSAID_GETACCEPTEXSOCKADDRS;
+		if (::WSAIoctl(sock,
+			SIO_GET_EXTENSION_FUNCTION_POINTER,
+			&func_guid, sizeof(func_guid),
+			&this->get_accept_ex_sockaddrs, sizeof(this->get_accept_ex_sockaddrs),
 			&bytes_returned, NULL, NULL) != 0)
 		{
 			this->err = ::WSAGetLastError();
@@ -120,7 +132,6 @@ struct evl::__internal::__network::socket_t
 	SOCKET sock = INVALID_SOCKET;
 	sockaddr_t addr{ 0 };
 
-	HANDLE comp_port = nullptr;
 	socket_t *parent = nullptr;
 
 	overlapped_t ovlp_init;
@@ -180,13 +191,12 @@ struct evl::__internal::__network::socket_t
 	static std::unique_ptr<socket_t> create_listen(const char *addr, uint16_t port, HANDLE comp_port)
 	{
 		std::unique_ptr<socket_t> result = std::make_unique<socket_t>(overlapped_type::o_accept);
-		result->comp_port = comp_port;
 
 		result->sock = ::WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
 		if (result->sock == INVALID_SOCKET)
 			throw 1;
 
-		if (::CreateIoCompletionPort((HANDLE)result->sock, result->comp_port, 0, 0) == nullptr)
+		if (::CreateIoCompletionPort((HANDLE)result->sock, comp_port, 0, 0) == nullptr)
 			throw 1;
 
 		result->addr.s4.sin_family = AF_INET;
@@ -207,13 +217,12 @@ struct evl::__internal::__network::socket_t
 	static std::unique_ptr<socket_t> create_connect(const char *addr, uint16_t port, HANDLE comp_port)
 	{
 		std::unique_ptr<socket_t> client = std::make_unique<socket_t>(overlapped_type::o_connect);
-		client->comp_port = comp_port;
 
 		client->sock = ::WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
 		if (client->sock == INVALID_SOCKET)
 			throw 1;
 
-		if (::CreateIoCompletionPort((HANDLE)client->sock, client->comp_port, 0, 0) == nullptr)
+		if (::CreateIoCompletionPort((HANDLE)client->sock, comp_port, 0, 0) == nullptr)
 			throw 1;
 
 		{
@@ -242,10 +251,9 @@ struct evl::__internal::__network::socket_t
 	}
 
 	[[nodiscard]]
-	std::unique_ptr<socket_t> prepare_accept(char *buf)
+	std::unique_ptr<socket_t> create_accept(char *buf, HANDLE comp_port)
 	{
 		std::unique_ptr<socket_t> client = std::make_unique<socket_t>(overlapped_type::o_accept);
-		client->comp_port = this->comp_port;
 		client->parent = this;
 
 		client->sock = ::WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
@@ -254,13 +262,13 @@ struct evl::__internal::__network::socket_t
 
 		DWORD breceived = 0;
 
-		if (winsock_ex::get_singleton().accept_ex(this->sock, client->sock, buf, 0, sizeof(sockaddr_t::s4) + 16, sizeof(sockaddr_t::s4) + 16, &breceived, &client->ovlp_init.base) == FALSE)
+		if (winsock_ex::get_singleton().accept_ex(this->sock, client->sock, buf, 0, sizeof(sockaddr_t) + 16, sizeof(sockaddr_t) + 16, &breceived, &client->ovlp_init.base) == FALSE)
 		{
 			if (::WSAGetLastError() != ERROR_IO_PENDING)
 				throw 1;
 		}
 
-		if (::CreateIoCompletionPort((HANDLE)client->sock, this->comp_port, 0, 0) == nullptr)
+		if (::CreateIoCompletionPort((HANDLE)client->sock, comp_port, 0, 0) == nullptr)
 			throw 1;
 
 		return client;
@@ -328,15 +336,15 @@ static NTSTATUS(__stdcall *ZwSetTimerResolution)(IN ULONG RequestedResolution, I
 
 struct win32_new_context_impl : evl::__internal::context_impl
 {
-	HANDLE comp_port = nullptr;
-	evl::__internal::context *ctx = nullptr;
+	HANDLE _comp_port = nullptr;
+	evl::__internal::context *_ctx = nullptr;
 
-	win32_new_context_impl(evl::__internal::context *_ctx) :
-		ctx(_ctx)
+	win32_new_context_impl(evl::__internal::context *ctx) :
+		_ctx(ctx)
 	{
-		this->comp_port = ::CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 0);
+		this->_comp_port = ::CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 0);
 
-		if (this->comp_port == nullptr)
+		if (this->_comp_port == nullptr)
 			throw 1;
 
 		wsa_initer::init();
@@ -351,16 +359,16 @@ struct win32_new_context_impl : evl::__internal::context_impl
 	virtual void waiting_loop() override
 	{
 		DWORD timeout = INFINITE;
-		bool wait_timer = !this->ctx->_timers.empty();
+		bool wait_timer = !this->_ctx->_timers.empty();
 
 		if (wait_timer)
 		{
-			auto delta = this->ctx->_timers.back()._time - std::chrono::system_clock::now();
+			auto delta = this->_ctx->_timers.back()._time - std::chrono::system_clock::now();
 			if (delta <= decltype(delta)(0))
 			{
-				auto t = std::move(this->ctx->_timers.back());
-				this->ctx->_timers.pop_back();
-				this->ctx->_add_ready_task(t._task);
+				auto t = std::move(this->_ctx->_timers.back());
+				this->_ctx->_timers.pop_back();
+				this->_ctx->_add_ready_task(t._task);
 				return;
 			}
 
@@ -375,16 +383,16 @@ struct win32_new_context_impl : evl::__internal::context_impl
 			DWORD bytes_transfered = 0;
 			ULONG_PTR completion_key = 0;
 			overlapped_t *ovlp = nullptr;
-			BOOL success = ::GetQueuedCompletionStatus(this->comp_port, &bytes_transfered, &completion_key, reinterpret_cast<OVERLAPPED **>(&ovlp), timeout);
+			BOOL success = ::GetQueuedCompletionStatus(this->_comp_port, &bytes_transfered, &completion_key, reinterpret_cast<OVERLAPPED **>(&ovlp), timeout);
 			timeout = 0;
 
 			if (success == FALSE)
 			{
 				if (wait_timer)
 				{
-					auto t = std::move(this->ctx->_timers.back());
-					this->ctx->_timers.pop_back();
-					this->ctx->_add_ready_task(t._task);
+					auto t = std::move(this->_ctx->_timers.back());
+					this->_ctx->_timers.pop_back();
+					this->_ctx->_add_ready_task(t._task);
 				}
 
 				return;
@@ -396,7 +404,17 @@ struct win32_new_context_impl : evl::__internal::context_impl
 
 				auto vt = std::static_pointer_cast<evl::__internal::__network::vaccept_task>(s->_vt_init.lock());
 				s->_vt_init = {};
-				s->addr.s4 = *(sockaddr_in *)(vt->_accept_buffer.data() + (sizeof(sockaddr_t::s4) + 16));
+
+				{
+					sockaddr *p_local_addr = nullptr;
+					sockaddr *p_remote_addr = nullptr;
+					INT local_addr_len = 0;
+					INT remote_addr_len = 0;
+
+					winsock_ex::get_singleton().get_accept_ex_sockaddrs(vt->_accept_buffer.data(), 0, sizeof(sockaddr_t) + 16, sizeof(sockaddr_t) + 16, &p_local_addr, &local_addr_len, &p_remote_addr, &remote_addr_len);
+					::memcpy(&s->addr, p_remote_addr, remote_addr_len);
+				}
+
 				vt->_ctx->_add_ready_task(vt);
 
 				continue;
@@ -453,7 +471,7 @@ evl::__internal::__network::listen_task::return_type evl::__internal::__network:
 
 void evl::__internal::__network::listen_task::_start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const
 {
-	this->_vt->_value._sock = socket_t::create_listen(this->_addr, this->_port, ctx->_get_impl<win32_new_context_impl>()->comp_port);
+	this->_vt->_value._sock = socket_t::create_listen(this->_addr, this->_port, ctx->_get_impl<win32_new_context_impl>()->_comp_port);
 
 	// no waiting
 	ctx->_add_ready_task(parent_vt.lock());
@@ -470,9 +488,9 @@ void evl::__internal::__network::accept_task::_start(context *ctx, std::weak_ptr
 	this->_vt->_ctx = ctx;
 	this->_vt->_parent_vt = std::move(parent_vt);
 
-	this->_vt->_accept_buffer.resize((sizeof(sockaddr_t::s4) + 16) * 2);
+	this->_vt->_accept_buffer.resize((sizeof(sockaddr_t) + 16) * 2);
 
-	this->_vt->_value._sock = this->_server->prepare_accept(this->_vt->_accept_buffer.data());
+	this->_vt->_value._sock = this->_server->create_accept(this->_vt->_accept_buffer.data(), ctx->_get_impl<win32_new_context_impl>()->_comp_port);
 	this->_vt->_value._sock->_vt_init = this->_vt;
 }
 
@@ -487,7 +505,7 @@ void evl::__internal::__network::connect_task::_start(context *ctx, std::weak_pt
 	this->_vt->_ctx = ctx;
 	this->_vt->_parent_vt = std::move(parent_vt);
 
-	this->_vt->_value._sock = socket_t::create_connect(this->_addr, this->_port, ctx->_get_impl<win32_new_context_impl>()->comp_port);
+	this->_vt->_value._sock = socket_t::create_connect(this->_addr, this->_port, ctx->_get_impl<win32_new_context_impl>()->_comp_port);
 	this->_vt->_value._sock->_vt_init = this->_vt;
 }
 

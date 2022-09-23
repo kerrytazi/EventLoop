@@ -58,7 +58,7 @@ evl::task<int> async_tasks()
 
 evl::task<void> async_server()
 {
-	auto listener = co_await evl::network::listen("0.0.0.0", 5150);
+	auto listener = evl::network::listen("0.0.0.0", 5150);
 
 	while (42)
 	{
@@ -106,13 +106,13 @@ int main()
 		ctx.run(async_context());
 	}
 
-	if (true)
+	if (false)
 	{
 		evl::context ctx;
 		ctx.run(async_server_client());
 	}
 
-	if (false)
+	// for (int i = 0; i < 10; ++i)
 	{
 		evl::context ctx;
 		auto result = ctx.run(async_tasks());
