@@ -1,5 +1,6 @@
 #include "../EventLoop/EventLoop.hpp"
 #include "../EventLoop/Network.hpp"
+#include "../EventLoop/Time.hpp"
 
 #include <iostream>
 
@@ -20,14 +21,14 @@ evl::task<void> not_long_work2()
 {
 	std::cout << "not_long_work 2\n";
 
-	auto j = co_await evl::join(evl::async_sleep(std::chrono::seconds(1)), empty_work(), empty_work_int());
+	auto j = co_await evl::join(evl::time::async_sleep(std::chrono::seconds(1)), empty_work(), empty_work_int());
 	std::cout << "asd " << std::get<2>(j).val << "\n";
 
 	for (int i = 0; i < 30; ++i)
 	{
 		const auto now = std::chrono::system_clock::now();
 		std::cout << std::format("{:%F %T}", now) << '\n';
-		co_await evl::async_sleep(std::chrono::milliseconds(1));
+		co_await evl::time::async_sleep(std::chrono::milliseconds(1));
 	}
 
 	co_return;
@@ -58,7 +59,7 @@ evl::task<int> async_tasks()
 
 evl::task<void> async_server()
 {
-	auto listener = evl::network::listen("0.0.0.0", 5150);
+	auto listener = co_await evl::network::listen("0.0.0.0", 5150);
 
 	while (42)
 	{
@@ -112,7 +113,7 @@ int main()
 		ctx.run(async_server_client());
 	}
 
-	// for (int i = 0; i < 10; ++i)
+	if (true)
 	{
 		evl::context ctx;
 		auto result = ctx.run(async_tasks());

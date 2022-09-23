@@ -145,10 +145,12 @@
   <ItemGroup>
     <ClInclude Include="EventLoop.hpp" />
     <ClInclude Include="Network.hpp" />
+    <ClInclude Include="Time.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="EventLoop.cpp" />
     <ClCompile Include="Network.cpp" />
+    <ClCompile Include="Time.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

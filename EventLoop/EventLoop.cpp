@@ -28,16 +28,6 @@ evl::__internal::task<void> evl::__internal::task_promise_type<void>::get_return
 	return task<void>(std::move(vt));
 }
 
-evl::__internal::timer_task evl::__internal::async_sleep_until(std::chrono::system_clock::time_point time)
-{
-	return evl::__internal::timer_task(time);
-}
-
-evl::__internal::timer_task evl::__internal::async_sleep(std::chrono::system_clock::duration dur)
-{
-	return evl::__internal::async_sleep_until(std::chrono::system_clock::now() + dur);
-}
-
 evl::__internal::get_context_task evl::__internal::get_context()
 {
 	return get_context_task{};
