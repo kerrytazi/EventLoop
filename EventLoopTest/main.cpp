@@ -1,4 +1,5 @@
 #include "../EventLoop/EventLoop.hpp"
+#include "../EventLoop/Network.hpp"
 
 #include <iostream>
 
@@ -48,7 +49,7 @@ evl::task<int> long_work()
 	co_return static_cast<int>(v);
 }
 
-evl::task<int> async_main()
+evl::task<int> async_tasks()
 {
 	auto w = co_await long_work();
 	std::cout << "w: " << w << "\n";
@@ -57,33 +58,64 @@ evl::task<int> async_main()
 
 evl::task<void> async_server()
 {
-	auto listener = evl::tcp_server::create("0.0.0.0", 5150);
-
-	std::vector<char> data;
+	auto listener = evl::network::listen("0.0.0.0", 5150);
 
 	while (42)
 	{
-		std::vector<char> data(128);
+		std::vector<char> data(6);
 
 		auto client = co_await listener.accept();
-		data = co_await client.recv(std::move(data));
-		auto wrote = co_await client.send_all(std::move(data));
+		auto done_recv = co_await client.recv_all(data.data(), data.size());
+		std::cout << "Server: recv: '" << data.data() << "'\n";
+		auto done_send = co_await client.send_all(data.data(), data.size());
 	}
+}
+
+evl::task<void> async_connect()
+{
+	while (42)
+	{
+		std::vector<char> data{ 'h', 'e', 'l', 'l', 'o', '\0' };
+
+		auto client = co_await evl::network::connect("127.0.0.1", 5150);
+		auto done_send = co_await client.send_all(data.data(), data.size());
+		auto done_recv = co_await client.recv_all(data.data(), data.size());
+
+		std::cout << "Client: recv: '" << data.data() << "'\n";
+	}
+}
+
+evl::task<void> async_server_client()
+{
+	co_await evl::join(async_server(), async_connect());
+}
+
+evl::task<void> async_context()
+{
+	auto ctx = co_await evl::get_context();
+	int a = 0;
 }
 
 int main()
 {
 	int b = 0;
 
+	if (false)
 	{
 		evl::context ctx;
-		ctx.run(async_server());
+		ctx.run(async_context());
+	}
+
+	if (false)
+	{
+		evl::context ctx;
+		ctx.run(async_server_client());
 	}
 
 	// for (int i = 0; i < 10; ++i)
 	{
 		evl::context ctx;
-		auto result = ctx.run(async_main());
+		auto result = ctx.run(async_tasks());
 		std::cout << "run: " << result << "\n";
 	}
 

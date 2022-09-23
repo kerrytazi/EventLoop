@@ -14,9 +14,15 @@
     <ClInclude Include="EventLoop.hpp">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="Network.hpp">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="EventLoop.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Network.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

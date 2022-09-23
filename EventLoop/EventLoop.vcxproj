@@ -144,9 +144,11 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="EventLoop.hpp" />
+    <ClInclude Include="Network.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="EventLoop.cpp" />
+    <ClCompile Include="Network.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

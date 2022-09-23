@@ -39,10 +39,6 @@ struct vjoin_task;
 
 struct context;
 
-struct socket_t;
-struct tcp_server;
-struct accept_task;
-
 
 struct vtask_base
 {
@@ -78,6 +74,9 @@ struct context
 	{
 		this->_ready_tasks.push_back(vt);
 	}
+
+	void _impl_waiting_loop();
+	void _impl_init();
 
 	void _loop(std::shared_ptr<vtask_base> main_vt, std::coroutine_handle<> main_handle);
 
@@ -332,119 +331,27 @@ join_task<TTasks...> join(TTasks&&... tasks)
 	return join_task(std::forward<TTasks>(tasks)...);
 }
 
-struct vrecv_task;
-
-struct recv_task
+struct get_context_task
 {
-	std::shared_ptr<vrecv_task> _vt;
-	socket_t *_client = nullptr;
-
-	using return_type = std::vector<char>;
+	context *_value;
+	using return_type = context *;
 
 	constexpr bool await_ready() const noexcept { return false; }
-	return_type await_resume();
+	return_type await_resume() const { return this->_value; }
 
 	template <typename K>
-	void await_suspend(std::coroutine_handle<K> parent_cor) const
+	void await_suspend(std::coroutine_handle<K> parent_cor)
 	{
 		auto &parent_prom = parent_cor.promise();
 		auto ctx = parent_prom._ctx;
 
-		this->_start(ctx, parent_prom._vt);
+		this->_value = ctx;
+
+		ctx->_add_ready_task(parent_prom._vt.lock());
 	}
-
-	void _start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const;
 };
 
-struct vsend_task;
-
-struct send_task
-{
-	std::shared_ptr<vsend_task> _vt;
-	socket_t *_client = nullptr;
-
-	using return_type = std::vector<char>;
-
-	constexpr bool await_ready() const noexcept { return false; }
-	return_type await_resume();
-
-	template <typename K>
-	void await_suspend(std::coroutine_handle<K> parent_cor) const
-	{
-		auto &parent_prom = parent_cor.promise();
-		auto ctx = parent_prom._ctx;
-
-		this->_start(ctx, parent_prom._vt);
-	}
-
-	void _start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const;
-};
-
-struct tcp_client
-{
-	std::unique_ptr<socket_t> _sock;
-
-	recv_task recv(std::vector<char> &&buffer);
-	send_task send(std::vector<char> &&buffer);
-
-	task<size_t> send_all(std::vector<char> &&buffer)
-	{
-		while (!buffer.empty())
-			buffer = co_await this->send(std::move(buffer));
-
-		co_return 0;
-	}
-
-	tcp_client() = default;
-	tcp_client(tcp_client &&);
-	~tcp_client();
-};
-
-struct vinit_task_base : vtask_base
-{
-	context *_ctx = nullptr;
-};
-
-struct vaccept_task;
-
-struct accept_task
-{
-	std::shared_ptr<vaccept_task> _vt;
-	socket_t *_server = nullptr;
-
-	using return_type = tcp_client;
-
-	constexpr bool await_ready() const noexcept { return false; }
-	return_type await_resume();
-
-	template <typename K>
-	void await_suspend(std::coroutine_handle<K> parent_cor) const
-	{
-		auto &parent_prom = parent_cor.promise();
-		auto ctx = parent_prom._ctx;
-
-		this->_start(ctx, parent_prom._vt);
-	}
-
-	void _start(context *ctx, std::weak_ptr<vtask_base> parent_vt) const;
-
-	accept_task() = default;
-	accept_task(accept_task &&);
-	~accept_task();
-};
-
-struct tcp_server
-{
-	std::unique_ptr<socket_t> _sock;
-
-	tcp_server() = default;
-	tcp_server(tcp_server &&);
-	~tcp_server();
-
-	static tcp_server create(const char *addr, uint16_t port);
-
-	accept_task accept();
-};
+get_context_task get_context();
 
 } // namespace __internal
 
@@ -453,10 +360,13 @@ using __internal::context;
 using __internal::timer_task;
 using __internal::async_sleep;
 using __internal::async_sleep_until;
-using __internal::join;
+
+using __internal::join_task;
 using __internal::wrapper;
-using __internal::tcp_server;
-using __internal::accept_task;
+using __internal::join;
+
+using __internal::get_context_task;
+using __internal::get_context;
 
 } // namespace evl
 
