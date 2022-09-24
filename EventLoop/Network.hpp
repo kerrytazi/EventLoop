@@ -2,6 +2,8 @@
 
 #include "EventLoop.hpp"
 
+#include <ranges>
+
 
 namespace evl
 {
@@ -21,6 +23,7 @@ struct vrecv_task;
 struct vsend_task;
 
 struct tcp_server;
+struct tcp_client_buffered;
 struct tcp_client;
 
 
@@ -163,39 +166,54 @@ struct tcp_client
 {
 	std::unique_ptr<socket_t> _sock;
 
-	recv_task recv(char *data, size_t size);
-	send_task send(const char *data, size_t size);
+	recv_task recv(std::span<char> data);
+	send_task send(std::span<std::add_const_t<char>> data);
 
-	task<recv_task::return_type> recv_all(char *data, size_t size)
+	task<recv_task::return_type> recv_all(std::span<char> data)
 	{
-		size_t total = 0;
+		size_t prev = data.size();
 
-		while (total != size)
-		{
-			size_t done = co_await this->recv(&data[total], size - total);
-			total += done;
-		}
+		while (!data.empty())
+			data = data.subspan(co_await this->recv(data));
 
-		co_return total;
+		co_return prev - data.size();
 	}
 
-	task<send_task::return_type> send_all(const char *data, size_t size)
+	task<send_task::return_type> send_all(std::span<std::add_const_t<char>> data)
 	{
-		size_t total = 0;
+		size_t prev = data.size();
 
-		while (total != size)
-		{
-			size_t done = co_await this->send(&data[total], size - total);
-			total += done;
-		}
+		while (!data.empty())
+			data = data.subspan(co_await this->send(data));
 
-		co_return total;
+		co_return prev - data.size();
 	}
+
+	tcp_client_buffered make_buffered() &&;
 
 	tcp_client() = default;
 	tcp_client(tcp_client &&);
 	~tcp_client();
 };
+
+struct tcp_client_buffered
+{
+	tcp_client _client;
+	std::vector<char> _recv_buf;
+	size_t _offset = 0;
+
+	recv_task::return_type _recv_line(std::span<char> done_part, std::vector<char> &line);
+
+	recv_task recv(std::span<char> data) { return this->_client.recv(data); }
+	send_task send(std::span<std::add_const_t<char>> data) { return this->_client.send(data); }
+	task<recv_task::return_type> recv_all(std::span<char> data);
+	task<send_task::return_type> send_all(std::span<std::add_const_t<char>> data) { return this->_client.send_all(data); }
+
+	task<recv_task::return_type> recv_line(std::vector<char> &line);
+
+	tcp_client_buffered(tcp_client &&client);
+};
+
 
 listen_task listen(const char *addr, uint16_t port);
 connect_task connect(const char *addr, uint16_t port);
@@ -214,6 +232,7 @@ using __internal::__network::recv_task;
 using __internal::__network::send_task;
 
 using __internal::__network::tcp_server;
+using __internal::__network::tcp_client_buffered;
 using __internal::__network::tcp_client;
 
 using __internal::__network::listen;

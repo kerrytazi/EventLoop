@@ -148,6 +148,7 @@
     <ClInclude Include="Time.hpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="ContextImplWin32New.cpp" />
     <ClCompile Include="EventLoop.cpp" />
     <ClCompile Include="Network.cpp" />
     <ClCompile Include="Time.cpp" />
