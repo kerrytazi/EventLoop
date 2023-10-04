@@ -2,8 +2,6 @@
 
 #include "EventLoop.hpp"
 
-#include <ranges>
-
 
 namespace evl
 {
@@ -238,7 +236,7 @@ using __internal::__network::tcp_client;
 using __internal::__network::listen;
 using __internal::__network::connect;
 
-}
+} // namespace network
 
 } // namespace evl
 

@@ -1,15 +1,6 @@
 #pragma once
 
-#include <coroutine>
-#include <vector>
-#include <utility>
-#include <tuple>
-#include <memory>
-#include <optional>
-#include <chrono>
-#include <thread>
-#include <algorithm>
-
+#include "pch.hpp"
 
 namespace evl
 {
@@ -43,41 +34,50 @@ struct context;
 struct vtask_base
 {
 	virtual ~vtask_base() = default;
-	virtual void resume() = 0;
+	virtual void resume(const std::shared_ptr<vtask_base> &from_vt) = 0;
 };
 
 struct timer_info
 {
 	context *_ctx;
-	std::shared_ptr<vtask_base> _task;
+	std::shared_ptr<vtask_base> _parent_vt;
 	std::chrono::system_clock::time_point _time;
 };
 
 struct context_impl
 {
 	virtual ~context_impl() = default;
+	virtual void rename_native_thread(size_t worker_id) = 0;
 	virtual void waiting_loop() = 0;
+	virtual void mark_complete() = 0;
+	virtual void continue_queue() = 0;
 };
 
 struct context
 {
+	struct ready_task_t
+	{
+		std::shared_ptr<vtask_base> vt;
+		std::shared_ptr<vtask_base> from_vt;
+	};
+
 	std::unique_ptr<context_impl> _impl;
-	std::vector<std::shared_ptr<vtask_base>> _ready_tasks;
+	std::vector<ready_task_t> _ready_tasks;
 	std::vector<timer_info> _timers;
+
+	std::mutex _mtx;
+	std::condition_variable _cv;
+	std::vector<std::thread> _ths;
+	bool _complete = false;
 
 	template <typename T>
 	T *_get_impl() const { return static_cast<T *>(this->_impl.get()); }
 
-	void _add_timer(timer_info tim)
-	{
-		const auto f = [](const timer_info &left, const timer_info &right) { return left._time > right._time; };
-		this->_timers.insert(std::lower_bound(this->_timers.begin(), this->_timers.end(), tim, f), std::move(tim));
-	}
+	void _worker(size_t worker_id);
+	void _mark_complete();
 
-	void _add_ready_task(const std::shared_ptr<vtask_base> &vt)
-	{
-		this->_ready_tasks.push_back(vt);
-	}
+	void _add_timer(timer_info tim);
+	void _add_ready_task(const std::shared_ptr<vtask_base> &vt, const std::shared_ptr<vtask_base> &from_vt);
 
 	void _loop(std::shared_ptr<vtask_base> main_vt, std::coroutine_handle<> main_handle);
 
@@ -101,7 +101,9 @@ struct task_promise_type_base
 	void _continue_parent() const
 	{
 		if (!this->_parent_vt.expired())
-			this->_ctx->_add_ready_task(this->_parent_vt.lock());
+			this->_ctx->_add_ready_task(this->_parent_vt.lock(), this->_vt.lock());
+		else
+			this->_ctx->_mark_complete();
 	}
 
 	constexpr void unhandled_exception() {}
@@ -145,7 +147,7 @@ struct vtask : vtask_base
 	{}
 
 	~vtask() { this->_h.destroy(); }
-	virtual void resume() override { this->_h.resume(); }
+	virtual void resume(const std::shared_ptr<vtask_base> &from_vt) override { this->_h.resume(); }
 };
 
 template <typename T>
@@ -168,7 +170,7 @@ struct task_base
 		this_prom._ctx = ctx;
 		this_prom._parent_vt = parent_prom._vt;
 
-		ctx->_add_ready_task(this->_vt);
+		ctx->_add_ready_task(this->_vt, {});
 	}
 
 	task_base(std::shared_ptr<vtask<T>> &&vt) :
@@ -207,6 +209,7 @@ task<T> task_promise_type<T>::get_return_object()
 struct vjoin_task : vtask_base
 {
 	context *_ctx = nullptr;
+	std::weak_ptr<vtask_base> _vt;
 	std::weak_ptr<vtask_base> _parent_vt;
 
 	size_t _counter = 0;
@@ -217,12 +220,12 @@ struct vjoin_task : vtask_base
 	{
 	}
 
-	virtual void resume() override
+	virtual void resume(const std::shared_ptr<vtask_base> &from_vt) override
 	{
 		if (++this->_counter == this->_max_counter)
 		{
 			if (!this->_parent_vt.expired())
-				this->_ctx->_add_ready_task(this->_parent_vt.lock());
+				this->_ctx->_add_ready_task(this->_parent_vt.lock(), this->_vt.lock());
 		}
 	}
 };
@@ -234,42 +237,42 @@ struct tmp_task_t
 };
 
 template <typename T>
-struct wrapper
+struct join_wrapper
 {
 	T val;
 
-	wrapper(T &&v) :
+	join_wrapper(T &&v) :
 		val(std::move(v))
 	{}
 };
 
 template <>
-struct wrapper<void>
+struct join_wrapper<void>
 {
-	wrapper() {}
+	join_wrapper() {}
 };
 
 template <typename T>
-auto to_wrapper(const T &tt)
+auto to_join_wrapper(const T &tt)
 {
 	if constexpr (std::is_void_v<typename T::return_type>)
 	{
 		tt.await_resume();
-		return wrapper<void>{};
+		return join_wrapper<void>{};
 	}
 	else
 	{
-		return wrapper<typename T::return_type>{ tt.await_resume() };
+		return join_wrapper<typename T::return_type>{ tt.await_resume() };
 	}
 }
 
 template <typename... TTasks>
 struct join_task
 {
-	using return_type = std::tuple<wrapper<typename TTasks::return_type>...>;
+	using return_type = std::tuple<join_wrapper<typename TTasks::return_type>...>;
 
 	constexpr bool await_ready() const noexcept { return false; }
-	return_type await_resume() const { return std::apply([](const auto&... t) { return std::make_tuple(to_wrapper(t)...); }, this->_tasks); }
+	return_type await_resume() const { return std::apply([](const auto&... t) { return std::make_tuple(to_join_wrapper(t)...); }, this->_tasks); }
 
 	template <typename K>
 	void await_suspend(std::coroutine_handle<K> parent_cor) const
@@ -278,6 +281,7 @@ struct join_task
 		auto ctx = parent_prom._ctx;
 
 		this->_vt->_ctx = ctx;
+		this->_vt->_vt = this->_vt;
 		this->_vt->_parent_vt = parent_prom._vt;
 
 		tmp_task_t tmp_task;
@@ -303,6 +307,136 @@ join_task<TTasks...> join(TTasks&&... tasks)
 	return join_task(std::forward<TTasks>(tasks)...);
 }
 
+template <typename TFunc, typename TArg>
+static constexpr bool is_invocable_v_voided = std::is_invocable_v<TFunc, TArg>;
+
+template <typename TFunc>
+static constexpr bool is_invocable_v_voided<TFunc, void> = std::is_invocable_v<TFunc>;
+
+template <typename TTask, typename TCallback,
+	std::enable_if_t<is_invocable_v_voided<TCallback, typename TTask::return_type>, bool> = true>
+struct selector
+{
+	TTask _task;
+	TCallback _callback;
+
+	using Task_t = TTask;
+	using TCallback_t = TCallback;
+
+	selector(TTask &&task, TCallback &&callback) :
+		_task(std::move(task)),
+		_callback(std::move(callback))
+	{
+	}
+};
+
+template <typename>
+struct unpack_pair;
+
+template <template <typename T1, typename T2> typename unpacked, typename TTask, typename TCallback>
+struct unpack_pair<unpacked<TTask, TCallback>>
+{
+	using type = selector<TTask, TCallback>;
+};
+
+template <typename P>
+using unpack_pair_t = typename unpack_pair<P>::type;
+
+struct vselect_task : vtask_base
+{
+	context *_ctx = nullptr;
+	std::weak_ptr<vtask_base> _vt;
+	std::weak_ptr<vtask_base> _parent_vt;
+
+	std::shared_ptr<vtask_base> _from_vt;
+
+	virtual void resume(const std::shared_ptr<vtask_base> &from_vt) override
+	{
+		if (!this->_from_vt)
+		{
+			this->_from_vt = from_vt;
+
+			if (!this->_parent_vt.expired())
+				this->_ctx->_add_ready_task(this->_parent_vt.lock(), this->_vt.lock());
+		}
+		else
+		{
+			// TODO
+		}
+	}
+};
+
+template <typename TSelector>
+void to_select_wrapper(const TSelector &tt)
+{
+	if constexpr (std::is_void_v<typename TSelector::Task_t::return_type>)
+	{
+		tt._task.await_resume();
+		tt._callback();
+	}
+	else
+	{
+		tt._callback(tt._task.await_resume());
+	}
+}
+
+template <typename... TPairs>
+struct select_task
+{
+	using return_type = void;
+
+	constexpr bool await_ready() const noexcept { return false; }
+	return_type await_resume() const {
+		std::apply([&](const auto &... _t) {
+			int _[] = {
+				0,
+				(
+					[&](const auto &t) {
+						if (t._task._vt == this->_vt->_from_vt)
+							to_select_wrapper(t);
+					}(_t),
+					0
+				)...
+			};
+
+			(void)_;
+		}, this->_tasks);
+	}
+
+	template <typename K>
+	void await_suspend(std::coroutine_handle<K> parent_cor) const
+	{
+		auto &parent_prom = parent_cor.promise();
+		auto ctx = parent_prom._ctx;
+
+		this->_vt->_ctx = ctx;
+		this->_vt->_vt = this->_vt;
+		this->_vt->_parent_vt = parent_prom._vt;
+
+		tmp_task_t tmp_task;
+		tmp_task._ctx = ctx;
+		tmp_task._vt = this->_vt;
+		const std::coroutine_handle<tmp_task_t> tmp_h = std::coroutine_handle<tmp_task_t>::from_promise(tmp_task);
+
+		std::apply([&tmp_h](auto& ...p) { (..., p._task.await_suspend(tmp_h)); }, this->_tasks);
+	}
+
+	select_task(TPairs&&... tasks) :
+		_vt(std::make_shared<vselect_task>()),
+		_tasks(std::forward<TPairs>(tasks)...)
+	{
+	}
+
+	std::shared_ptr<vselect_task> _vt;
+	std::tuple<TPairs...> _tasks;
+};
+
+template <typename... TPairs>
+select_task<TPairs...> select(TPairs&&... tasks)
+{
+	return select_task(std::forward<TPairs>(tasks)...);
+}
+
 struct get_context_task
 {
 	context *_value;
@@ -319,7 +453,7 @@ struct get_context_task
 
 		this->_value = ctx;
 
-		ctx->_add_ready_task(parent_prom._vt.lock());
+		ctx->_add_ready_task(parent_prom._vt.lock(), {}); // TODO
 	}
 };
 
@@ -330,9 +464,13 @@ get_context_task get_context();
 using __internal::task;
 using __internal::context;
 
+using __internal::join_wrapper;
 using __internal::join_task;
-using __internal::wrapper;
 using __internal::join;
+
+using __internal::selector;
+using __internal::select_task;
+using __internal::select;
 
 using __internal::get_context_task;
 using __internal::get_context;

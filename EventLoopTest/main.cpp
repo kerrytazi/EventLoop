@@ -97,7 +97,7 @@ evl::task<void> buffered_server()
 {
 	auto listener = co_await evl::network::listen("0.0.0.0", 5150);
 
-	while (42)
+	//while (42)
 	{
 		std::vector<char> data;
 
@@ -117,7 +117,7 @@ evl::task<void> buffered_server()
 
 evl::task<void> buffered_connect()
 {
-	while (42)
+	//while (42)
 	{
 		const char *s = "hello\nworld\n";
 		std::vector<char> data(s, s + 12);
@@ -142,6 +142,21 @@ evl::task<void> async_context()
 	int a = 0;
 }
 
+evl::task<void> test_sleep(int ms)
+{
+	co_await evl::time::async_sleep(std::chrono::milliseconds(ms));
+}
+
+evl::task<void> test_select()
+{
+	auto t1 = evl::selector(test_sleep(1000), []() { std::cout << "sleep 1\n"; });
+	auto t2 = evl::selector(test_sleep(1000), []() { std::cout << "sleep 2\n"; });
+
+	co_await evl::select(std::move(t1), std::move(t2));
+
+	int a = 0;
+}
+
 #include <Windows.h>
 
 int main()
@@ -153,18 +168,18 @@ int main()
 		delete new int{};
 	}
 
-	if (true)
-	{
-		evl::context ctx;
-		ctx.run(async_context());
-	}
-
 	{
 		DWORD count = 0;
 		if (::GetProcessHandleCount(::GetCurrentProcess(), &count) == FALSE)
-			__debugbreak();
+			throw 1;
 
 		std::cout << "app start. handles: " << count << "\n";
+	}
+
+	if (true)
+	{
+		evl::context ctx;
+		ctx.run(test_select());
 	}
 
 	if (false)
@@ -174,7 +189,7 @@ int main()
 	}
 
 	for (int i = 0; i < 20; ++i)
-	if (true)
+	if (false)
 	{
 		evl::context ctx;
 		ctx.run(buffered_server_client());
@@ -196,7 +211,7 @@ int main()
 	{
 		DWORD count = 0;
 		if (::GetProcessHandleCount(::GetCurrentProcess(), &count) == FALSE)
-			__debugbreak();
+			throw 1;
 
 		std::cout << "app end. handles: " << count << "\n";
 	}

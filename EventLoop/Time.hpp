@@ -32,9 +32,9 @@ struct timer_task
 		auto ctx = parent_prom._ctx;
 
 		timer_info info;
-		info._ctx = ctx,
-		info._task = parent_prom._vt.lock(),
-		info._time = this->_time,
+		info._ctx = ctx;
+		info._parent_vt = parent_prom._vt.lock();
+		info._time = this->_time;
 
 		ctx->_add_timer(std::move(info));
 	}
@@ -54,7 +54,7 @@ using __internal::__time::timer_task;
 using __internal::__time::async_sleep;
 using __internal::__time::async_sleep_until;
 
-}
+} // namespace time
 
 } // namespace evl
 
